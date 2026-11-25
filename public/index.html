@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>السبورة المشتركة</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+  html, body { height: 100%; overflow: hidden; background: #f2f2f2; }
+
+  /* صفحة الدخول */
+  #login { position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; background: #1b2a4e; color: #fff; z-index: 100; }
+  #login h1 { font-size: 28px; }
+  #login input { padding: 12px 16px; font-size: 18px; border-radius: 10px; border: none;
+    width: 260px; text-align: center; }
+  #login button { padding: 12px 28px; font-size: 18px; border: none; border-radius: 10px;
+    background: #0b6bde; color: #fff; cursor: pointer; }
+
+  /* السبورة */
+  #board { position: absolute; inset: 0; background-color: #f2f2f2;
+    background-image: radial-gradient(#bbb 1.5px, transparent 1.5px);
+    background-size: 30px 30px; touch-action: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  .bar { position: fixed; background: #202124; color: #fff; border-radius: 16px;
+    padding: 8px 12px; display: flex; gap: 10px; align-items: center; z-index: 10;
+    box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+  .bar button { background: none; border: none; color: #fff; font-size: 15px;
+    padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+  .bar button.active { background: #3b5bdb; }
+  #top { top: 12px; left: 12px; right: 12px; justify-content: space-between; }
+  #tools { bottom: 12px; left: 50%; transform: translateX(-50%); flex-wrap: wrap;
+    justify-content: center; max-width: 96vw; }
+  #tools input[type=color] { width: 36px; height: 36px; border: none; background: none; }
+  #tools input[type=range] { width: 90px; }
+
+  .note { position: absolute; width: 160px; min-height: 120px; background: #fff176;
+    padding: 8px; box-shadow: 2px 4px 8px rgba(0,0,0,.25); font-size: 16px;
+    outline: none; z-index: 5; cursor: move; white-space: pre-wrap; }
+  .textbox { position: absolute; min-width: 60px; font-size: 22px; outline: none;
+    z-index: 5; padding: 2px 4px; border: 1px dashed transparent; }
+  .textbox:focus { border-color: #888; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h1>السبورة المشتركة</h1>
+  <input id="roomInput" placeholder="اكتب اسم الروم" maxlength="40">
+  <button id="joinBtn">دخول</button>
+  <small>اكتب نفس الاسم عند صاحبك عشان تدخلوا مع بعض</small>
+</div>
+
+<div id="board">
+  <canvas id="canvas"></canvas>
+</div>
+
+<div class="bar" id="top">
+  <div>
+    <span id="roomLabel"></span>
+    <span id="usersLabel"></span>
+  </div>
+  <div>
+    <button id="copyBtn">نسخ الرابط</button>
+    <button id="clearBtn">مسح الكل</button>
+  </div>
+</div>
+
+<div class="bar" id="tools">
+  <button data-tool="pen" class="active">قلم</button>
+  <button data-tool="highlighter">هايلايتر</button>
+  <button data-tool="eraser">ممحاة</button>
+  <button data-tool="line">خط</button>
+  <button data-tool="rect">مربع</button>
+  <button data-tool="circle">دايرة</button>
+  <button data-tool="text">نص</button>
+  <button data-tool="note">ملاحظة</button>
+  <input type="color" id="color" value="#4a00e0">
+  <input type="range" id="size" min="1" max="30" value="4">
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const board = document.getElementById('board');
+
+let strokes = [];
+let tool = 'pen';
+let drawing = false;
+let current = null;
+let roomName = '';
+
+function resize() {
+  canvas.width = window.innerWidth * devicePixelRatio;
+  canvas.height = window.innerHeight * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  redraw();
+}
+window.addEventListener('resize', resize);
+
+// ---------- الدخول للروم ----------
+function joinRoom(name) {
+  name = name.trim().toLowerCase();
+  if (!name) return;
+  roomName = name;
+  socket.emit('join', name);
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('roomLabel').textContent = 'الروم: ' + name;
+  history.replaceState(null, '', '?room=' + encodeURIComponent(name));
+}
+document.getElementById('joinBtn').onclick = () => joinRoom(document.getElementById('roomInput').value);
+document.getElementById('roomInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') joinRoom(e.target.value);
+});
+const urlRoom = new URLSearchParams(location.search).get('room');
+if (urlRoom) joinRoom(urlRoom);
+
+document.getElementById('copyBtn').onclick = () => {
+  navigator.clipboard.writeText(location.href);
+  alert('تم نسخ الرابط');
+};
+document.getElementById('clearBtn').onclick = () => {
+  if (confirm('مسح السبورة للجميع؟')) socket.emit('clear');
+};
+
+// ---------- الأدوات ----------
+document.querySelectorAll('[data-tool]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('[data-tool]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    tool = btn.dataset.tool;
+  };
+});
+
+// ---------- الرسم ----------
+function drawStroke(s) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = s.size;
+  ctx.globalAlpha = s.type === 'highlighter' ? 0.35 : 1;
+  if (s.type === 'highlighter') ctx.lineWidth = s.size * 3;
+  ctx.beginPath();
+  if (s.type === 'pen' || s.type === 'highlighter') {
+    s.points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+  } else if (s.type === 'line') {
+    ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2);
+  } else if (s.type === 'rect') {
+    ctx.rect(s.x1, s.y1, s.x2 - s.x1, s.y2 - s.y1);
+  } else if (s.type === 'circle') {
+    const rx = (s.x2 - s.x1) / 2, ry = (s.y2 - s.y1) / 2;
+    ctx.ellipse(s.x1 + rx, s.y1 + ry, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function redraw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  strokes.forEach(drawStroke);
+  if (current) drawStroke(current);
+}
+
+function pos(e) {
+  return { x: e.clientX, y: e.clientY };
+}
+function newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+// ---------- الممحاة: بتمسح أي خط قريب ----------
+function hitTest(s, p) {
+  const r = 14;
+  if (s.points) return s.points.some(q => Math.hypot(q.x - p.x, q.y - p.y) < r);
+  const minX = Math.min(s.x1, s.x2) - r, maxX = Math.max(s.x1, s.x2) + r;
+  const minY = Math.min(s.y1, s.y2) - r, maxY = Math.max(s.y1, s.y2) + r;
+  return p.x > minX && p.x < maxX && p.y > minY && p.y < maxY;
+}
+function eraseAt(p) {
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    if (hitTest(strokes[i], p)) {
+      socket.emit('erase', strokes[i].id);
+      strokes.splice(i, 1);
+      redraw();
+      return;
+    }
+  }
+}
+
+canvas.addEventListener('pointerdown', e => {
+  const p = pos(e);
+  if (tool === 'text') return addText(p.x, p.y);
+  if (tool === 'note') return addNote(p.x, p.y);
+  drawing = true;
+  canvas.setPointerCapture(e.pointerId);
+  if (tool === 'eraser') return eraseAt(p);
+  const color = document.getElementById('color').value;
+  const size = +document.getElementById('size').value;
+  if (tool === 'pen' || tool === 'highlighter') {
+    current = { id: newId(), type: tool, color, size, points: [p] };
+  } else {
+    current = { id: newId(), type: tool, color, size, x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+  }
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const p = pos(e);
+  if (tool === 'eraser') return eraseAt(p);
+  if (!current) return;
+  if (current.points) current.points.push(p);
+  else { current.x2 = p.x; current.y2 = p.y; }
+  redraw();
+});
+
+function endDraw() {
+  if (!drawing) return;
+  drawing = false;
+  if (current) {
+    strokes.push(current);
+    socket.emit('stroke', current);
+    current = null;
+    redraw();
+  }
+}
+canvas.addEventListener('pointerup', endDraw);
+canvas.addEventListener('pointercancel', endDraw);
+
+// ---------- النصوص والملاحظات ----------
+const notesEl = {};
+
+function renderNote(n) {
+  let el = notesEl[n.id];
+  if (!el) {
+    el = document.createElement('div');
+    el.dataset.id = n.id;
+    el.contentEditable = true;
+    notesEl[n.id] = el;
+    board.appendChild(el);
+
+    el.addEventListener('input', () => {
+      n.text = el.innerText;
+      socket.emit('note', n);
+    });
+
+    // السحب
+    let dragging = false, ox = 0, oy = 0;
+    el.addEventListener('pointerdown', e => {
+      if (document.activeElement === el) return;
+      dragging = true;
+      ox = e.clientX - el.offsetLeft;
+      oy = e.clientY - el.offsetTop;
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      n.x = e.clientX - ox; n.y = e.clientY - oy;
+      el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
+    });
+    el.addEventListener('pointerup', () => {
+      if (dragging) { dragging = false; socket.emit('note', n); }
+    });
+  }
+  el.className = n.kind === 'note' ? 'note' : 'textbox';
+  el.style.left = n.x + 'px';
+  el.style.top = n.y + 'px';
+  if (n.color) el.style.color = n.color;
+  if (el.innerText !== n.text) el.innerText = n.text || '';
+}
+
+function addNote(x, y) {
+  const n = { id: newId(), kind: 'note', x, y, text: '' };
+  renderNote(n);
+  notesEl[n.id].focus();
+  socket.emit('note', n);
+}
+function addText(x, y) {
+  const n = { id: newId(), kind: 'text', x, y, text: '', color: document.getElementById('color').value };
+  renderNote(n);
+  notesEl[n.id].focus();
+  socket.emit('note', n);
+}
+
+// ---------- أحداث السيرفر ----------
+socket.on('init', room => {
+  strokes = room.strokes;
+  Object.values(notesEl).forEach(el => el.remove());
+  for (const k in notesEl) delete notesEl[k];
+  room.notes.forEach(renderNote);
+  redraw();
+});
+socket.on('stroke', s => { strokes.push(s); redraw(); });
+socket.on('erase', id => { strokes = strokes.filter(s => s.id !== id); redraw(); });
+socket.on('note', n => renderNote(n));
+socket.on('clear', () => {
+  strokes = [];
+  Object.values(notesEl).forEach(el => el.remove());
+  for (const k in notesEl) delete notesEl[k];
+  redraw();
+});
+socket.on('users', count => {
+  document.getElementById('usersLabel').textContent = ' | الموجودين: ' + count;
+});
+
+resize();
+</script>
+</body>
+</html>
